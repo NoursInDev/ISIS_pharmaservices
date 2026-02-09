@@ -17,6 +17,7 @@ import pharmacie.dao.LigneRepository;
 import pharmacie.dao.MedicamentRepository;
 import pharmacie.entity.Commande;
 import pharmacie.entity.Ligne;
+import pharmacie.entity.Medicament;
 
 @Slf4j
 @Service
@@ -100,8 +101,42 @@ public class CommandeService {
      */
     @Transactional
     public Ligne ajouterLigne(int commandeNum, int medicamentRef, @Positive int quantite) {
-        // TODO : implémenter la méthode
-        throw new UnsupportedOperationException("Not implemented yet");
+        // Récupère la commande et le médicament (lance NoSuchElementException si absent)
+        Commande commande = commandeDao.findById(commandeNum).orElseThrow();
+        Medicament medicament = medicamentDao.findById(medicamentRef).orElseThrow();
+
+        // Vérifications métier
+        if (Boolean.TRUE.equals(medicament.isIndisponible())) {
+            throw new IllegalStateException("Le médicament est indisponible");
+        }
+        if (commande.getEnvoyeele() != null) {
+            throw new IllegalStateException("La commande a déjà été envoyée");
+        }
+        // Calcul du nouveau total en commande
+        int totalCommandesApres = medicament.getUnitesCommandees() + quantite;
+        if (medicament.getUnitesEnStock() < totalCommandesApres) {
+            throw new IllegalStateException("Pas assez d'unités en stock pour ajouter cette ligne");
+        }
+
+        // Si la ligne existe déjà pour cette commande et ce médicament, on additionne les quantités
+        var existing = ligneDao.findByCommandeAndMedicament(commande, medicament);
+        Ligne ligne;
+        if (existing.isPresent()) {
+            ligne = existing.get();
+            ligne.setQuantite(ligne.getQuantite() + quantite);
+        } else {
+            ligne = new Ligne();
+            ligne.setCommande(commande);
+            ligne.setMedicament(medicament);
+            ligne.setQuantite(quantite);
+        }
+        // Mettre à jour le médicament (unités en commande)
+        medicament.setUnitesCommandees(totalCommandesApres);
+        medicamentDao.save(medicament);
+
+        // Sauvegarder la ligne
+        Ligne saved = ligneDao.save(ligne);
+        return saved;
     }
 
     /**
@@ -118,8 +153,22 @@ public class CommandeService {
      */
     @Transactional
     public void supprimerLigne(int id) {
-        // TODO : implémenter la méthode
-        throw new UnsupportedOperationException("Not implemented yet");
+        Ligne ligne = ligneDao.findById(id).orElseThrow();
+        Commande commande = ligne.getCommande();
+        if (commande.getEnvoyeele() != null) {
+            throw new IllegalStateException("La commande a déjà été envoyée");
+        }
+        // Recharge le médicament depuis le DAO pour s'assurer d'avoir l'état le plus récent
+        var medRef = ligne.getMedicament().getReference();
+        Medicament medicament = medicamentDao.findById(medRef).orElseThrow();
+        int newUnitesCommandees = medicament.getUnitesCommandees() - ligne.getQuantite();
+        if (newUnitesCommandees < 0) {
+            throw new IllegalStateException("Incohérence sur les unités commandées pour le médicament");
+        }
+        medicament.setUnitesCommandees(newUnitesCommandees);
+        medicamentDao.save(medicament);
+        // suppression de la ligne
+        ligneDao.delete(ligne);
     }
 
     /**
@@ -139,8 +188,31 @@ public class CommandeService {
      */
     @Transactional
     public Commande enregistreExpedition(int commandeNum) {
-        // TODO : implémenter la méthode
-        throw new UnsupportedOperationException("Not implemented yet");
+        Commande commande = commandeDao.findById(commandeNum).orElseThrow();
+        if (commande.getEnvoyeele() != null) {
+            throw new IllegalStateException("La commande a déjà été envoyée");
+        }
+        // Vérifier et mettre à jour chaque médicament
+        for (Ligne ligne : commande.getLignes()) {
+            // Recharge le médicament depuis le DAO pour s'assurer d'avoir l'état le plus récent
+            var medRef = ligne.getMedicament().getReference();
+            Medicament medicament = medicamentDao.findById(medRef).orElseThrow();
+            int quantite = ligne.getQuantite();
+            if (medicament.getUnitesEnStock() < quantite) {
+                throw new IllegalStateException("Pas assez d'unités en stock pour expédier la commande");
+            }
+            int newEnStock = medicament.getUnitesEnStock() - quantite;
+            int newCommandees = medicament.getUnitesCommandees() - quantite;
+            if (newCommandees < 0) {
+                throw new IllegalStateException("Incohérence sur les unités commandées pour le médicament lors de l'expédition");
+            }
+            medicament.setUnitesEnStock(newEnStock);
+            medicament.setUnitesCommandees(newCommandees);
+            medicamentDao.save(medicament);
+        }
+        commande.setEnvoyeele(LocalDate.now());
+        commandeDao.save(commande);
+        return commande;
     }
 
     /**
